@@ -1,3 +1,6 @@
 [submodule "ext/cacti"]
 	path = ext/cacti
 	url = https://github.com/HewlettPackard/cacti.git
+[submodule "ext/gem5"]
+	path = ext/gem5
+	url = https://github.com/gem5/gem5.git

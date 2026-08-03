@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Source this file to build (once, cached) and expose Cacti:
+# Source this file to build (once, cached) and expose Cacti and gem5:
 #   source activate_environment.sh
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -58,4 +58,56 @@ cacti() (
     ./cacti "${args[@]}"
 )
 
-unset _aes_repo_root _aes_cacti_src _aes_build_dir _aes_stamp_file _aes_current_commit
+unset _aes_cacti_src _aes_build_dir _aes_stamp_file _aes_current_commit
+
+# --- gem5 (RISCV, opt) -------------------------------------------------
+# Built in-place inside ext/gem5/build/: gem5's own .gitignore already
+# excludes build/ and m5out/, so (unlike cacti) there's no need to keep the
+# submodule checkout pristine by building a separate copy.
+
+_aes_gem5_src="${_aes_repo_root}/ext/gem5"
+_aes_gem5_isa="RISCV"
+_aes_gem5_variant="opt"
+_aes_gem5_bin="${_aes_gem5_src}/build/${_aes_gem5_isa}/gem5.${_aes_gem5_variant}"
+_aes_gem5_stamp_file="${_aes_repo_root}/.tools/gem5.built-commit"
+
+if [[ ! -d "${_aes_gem5_src}" ]] || [[ -z "$(ls -A "${_aes_gem5_src}" 2>/dev/null)" ]]; then
+    echo "gem5 submodule not found/initialized at ${_aes_gem5_src}." >&2
+    echo "Run: git submodule update --init --recursive" >&2
+    unset _aes_repo_root _aes_gem5_src _aes_gem5_isa _aes_gem5_variant _aes_gem5_bin _aes_gem5_stamp_file
+    return 1
+fi
+
+_aes_gem5_current_commit="$(git -C "${_aes_gem5_src}" rev-parse HEAD 2>/dev/null)"
+
+if [[ -x "${_aes_gem5_bin}" ]] && [[ -f "${_aes_gem5_stamp_file}" ]] \
+        && [[ "$(cat "${_aes_gem5_stamp_file}")" == "${_aes_gem5_current_commit}" ]]; then
+    echo "gem5.${_aes_gem5_variant} (${_aes_gem5_isa}) already built for commit ${_aes_gem5_current_commit} (cached)."
+else
+    if ! command -v scons >/dev/null 2>&1; then
+        echo "scons not found; required to build gem5. Install it and re-source this script." >&2
+        unset _aes_repo_root _aes_gem5_src _aes_gem5_isa _aes_gem5_variant _aes_gem5_bin _aes_gem5_stamp_file _aes_gem5_current_commit
+        return 1
+    fi
+    echo "Building gem5.${_aes_gem5_variant} (${_aes_gem5_isa}, ${_aes_gem5_current_commit})... this can take a long time."
+    mkdir -p "${_aes_repo_root}/.tools"
+    # scons resolves relative target paths against the caller's cwd even with
+    # "-C", so cd into the submodule first or the build lands outside it.
+    if ( cd "${_aes_gem5_src}" && scons -j"$(nproc 2>/dev/null || echo 4)" "build/${_aes_gem5_isa}/gem5.${_aes_gem5_variant}" ) \
+            && echo "${_aes_gem5_current_commit}" > "${_aes_gem5_stamp_file}"; then
+        echo "gem5 build complete."
+    else
+        echo "gem5 build failed." >&2
+        unset _aes_repo_root _aes_gem5_src _aes_gem5_isa _aes_gem5_variant _aes_gem5_bin _aes_gem5_stamp_file _aes_gem5_current_commit
+        return 1
+    fi
+fi
+
+export GEM5_HOME="${_aes_gem5_src}"
+export GEM5_BIN="${_aes_gem5_bin}"
+
+gem5() {
+    "${GEM5_BIN}" "$@"
+}
+
+unset _aes_repo_root _aes_gem5_src _aes_gem5_isa _aes_gem5_variant _aes_gem5_bin _aes_gem5_stamp_file _aes_gem5_current_commit
