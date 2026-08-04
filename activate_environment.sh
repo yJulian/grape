@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Source this file to build (once, cached) and expose Cacti and gem5:
+# Source this file to build (once, cached) and expose Cacti, gem5, and DSENT:
 #   source activate_environment.sh
 
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
@@ -110,4 +110,54 @@ gem5() {
     "${GEM5_BIN}" "$@"
 }
 
-unset _aes_repo_root _aes_gem5_src _aes_gem5_isa _aes_gem5_variant _aes_gem5_bin _aes_gem5_stamp_file _aes_gem5_current_commit
+unset _aes_gem5_src _aes_gem5_isa _aes_gem5_variant _aes_gem5_bin _aes_gem5_stamp_file
+
+# --- DSENT (NoC power/area model used by Garnet) ------------------------
+# ext/gem5/ext/dsent/interface.cc only builds against the Python 2 C API
+# (Py_InitModule, PyString_*), so it doesn't compile against Python 3. To
+# keep ext/gem5 pristine, build a patched copy in .tools/ instead of editing
+# the submodule in place; see scripts/dsent-py3-patch/README.md.
+
+_aes_dsent_src="${GEM5_HOME}/ext/dsent"
+_aes_dsent_patch="${_aes_repo_root}/scripts/dsent-py3-patch/interface.cc"
+_aes_dsent_copy="${_aes_repo_root}/.tools/dsent"
+_aes_dsent_shim_dir="${_aes_repo_root}/.tools/dsent-shims"
+_aes_dsent_stamp_file="${_aes_dsent_copy}/.built-commit"
+_aes_dsent_stamp="${_aes_gem5_current_commit}:$(md5sum "${_aes_dsent_patch}" | cut -d' ' -f1)"
+
+if [[ -f "${_aes_dsent_stamp_file}" ]] && [[ "$(cat "${_aes_dsent_stamp_file}")" == "${_aes_dsent_stamp}" ]]; then
+    echo "dsent already built (cached)."
+else
+    echo "Building dsent (ported to Python 3)..."
+    rm -rf "${_aes_dsent_copy}"
+    mkdir -p "${_aes_dsent_copy}" "${_aes_dsent_shim_dir}"
+    cp -r "${_aes_dsent_src}" "${_aes_dsent_copy}/src"
+    cp "${_aes_dsent_patch}" "${_aes_dsent_copy}/src/interface.cc"
+
+    # DSENT's CMakeLists hardcodes the unversioned "python-config", which
+    # doesn't exist on systems that only ship python3-config.
+    if ! command -v python-config >/dev/null 2>&1; then
+        cat > "${_aes_dsent_shim_dir}/python-config" <<'PYCFG'
+#!/bin/sh
+exec python3-config "$@"
+PYCFG
+        chmod +x "${_aes_dsent_shim_dir}/python-config"
+    fi
+
+    mkdir -p "${_aes_dsent_copy}/build"
+    if ( cd "${_aes_dsent_copy}/build" \
+            && PATH="${_aes_dsent_shim_dir}:${PATH}" cmake ../src \
+            && PATH="${_aes_dsent_shim_dir}:${PATH}" make -j"$(nproc 2>/dev/null || echo 4)" ) \
+            && echo "${_aes_dsent_stamp}" > "${_aes_dsent_stamp_file}"; then
+        echo "dsent build complete."
+    else
+        echo "dsent build failed." >&2
+        unset _aes_dsent_src _aes_dsent_patch _aes_dsent_copy _aes_dsent_shim_dir _aes_dsent_stamp_file _aes_dsent_stamp _aes_repo_root _aes_gem5_current_commit
+        return 1
+    fi
+fi
+
+export DSENT_MODULE_DIR="${_aes_dsent_copy}/build"
+export DSENT_CONFIG_DIR="${_aes_dsent_src}/configs"
+
+unset _aes_repo_root _aes_dsent_src _aes_dsent_patch _aes_dsent_copy _aes_dsent_shim_dir _aes_dsent_stamp_file _aes_dsent_stamp _aes_gem5_current_commit
