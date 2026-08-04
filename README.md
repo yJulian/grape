@@ -1,4 +1,4 @@
-# gem5 + Cacti Architecture Modeling
+# GRAPE — gem5 aRea And Power Estimation
 
 ## Purpose
 
