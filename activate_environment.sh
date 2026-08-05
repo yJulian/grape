@@ -38,7 +38,32 @@ else
     fi
 fi
 
+# gem5 links Cacti in (see gem5_extras/cacti), which needs Cacti's code as a
+# library rather than as a program: same objects as the binary, minus its
+# main(), and -fPIC because gem5 links position-independent by default.
+if [[ ! -f "${_aes_build_dir}/libcacti.a" ]] \
+        || [[ "${_aes_build_dir}/libcacti.a" -ot "${_aes_build_dir}/cacti" ]]; then
+    echo "Building libcacti.a..."
+    if ! ( cd "${_aes_build_dir}" \
+            && mkdir -p obj_lib \
+            && ls *.cc | grep -v '^main\.cc$' \
+                | xargs -P"$(nproc 2>/dev/null || echo 4)" -I{} sh -c \
+                    'g++ -m64 -fPIC -O2 -g -Wno-unknown-pragmas -msse2 -mfpmath=sse \
+                        -DNTHREADS=8 -c "$1" -o "obj_lib/$(basename "$1" .cc).o"' _ {} \
+            && ar rcs libcacti.a obj_lib/*.o ); then
+        echo "libcacti.a build failed." >&2
+        unset _aes_repo_root _aes_cacti_src _aes_build_dir _aes_stamp_file _aes_current_commit
+        return 1
+    fi
+    echo "libcacti.a build complete."
+fi
+
 export CACTI_HOME="${_aes_build_dir}"
+# Consumed by gem5_extras/cacti/SConscript when gem5 is built below. The
+# headers come from the pristine submodule, the library from the build copy;
+# they are the same code.
+export GRAPE_CACTI_SRC="${_aes_cacti_src}"
+export GRAPE_CACTI_LIB="${_aes_build_dir}/libcacti.a"
 
 # cacti loads its technology data (tech_params/*.dat) via a path relative to the
 # process's cwd, not to the binary's location, so it must always be invoked with
@@ -70,6 +95,9 @@ _aes_gem5_isa="RISCV"
 _aes_gem5_variant="opt"
 _aes_gem5_bin="${_aes_gem5_src}/build/${_aes_gem5_isa}/gem5.${_aes_gem5_variant}"
 _aes_gem5_stamp_file="${_aes_repo_root}/.tools/gem5.built-commit"
+# Compiled into gem5 through scons' EXTRAS mechanism: the CactiCache
+# SimObject, which calls Cacti in-process (see gem5_extras/cacti/SConscript).
+_aes_gem5_extras="${_aes_repo_root}/gem5_extras/cacti"
 
 if [[ ! -d "${_aes_gem5_src}" ]] || [[ -z "$(ls -A "${_aes_gem5_src}" 2>/dev/null)" ]]; then
     echo "gem5 submodule not found/initialized at ${_aes_gem5_src}." >&2
@@ -79,9 +107,12 @@ if [[ ! -d "${_aes_gem5_src}" ]] || [[ -z "$(ls -A "${_aes_gem5_src}" 2>/dev/nul
 fi
 
 _aes_gem5_current_commit="$(git -C "${_aes_gem5_src}" rev-parse HEAD 2>/dev/null)"
+# The stamp covers the extras too, so editing the CactiCache SimObject is
+# enough to get scons re-run on the next source.
+_aes_gem5_stamp="${_aes_gem5_current_commit}:$(cat "${_aes_gem5_extras}"/* | md5sum | cut -d' ' -f1)"
 
 if [[ -x "${_aes_gem5_bin}" ]] && [[ -f "${_aes_gem5_stamp_file}" ]] \
-        && [[ "$(cat "${_aes_gem5_stamp_file}")" == "${_aes_gem5_current_commit}" ]]; then
+        && [[ "$(cat "${_aes_gem5_stamp_file}")" == "${_aes_gem5_stamp}" ]]; then
     echo "gem5.${_aes_gem5_variant} (${_aes_gem5_isa}) already built for commit ${_aes_gem5_current_commit} (cached)."
 else
     if ! command -v scons >/dev/null 2>&1; then
@@ -93,8 +124,10 @@ else
     mkdir -p "${_aes_repo_root}/.tools"
     # scons resolves relative target paths against the caller's cwd even with
     # "-C", so cd into the submodule first or the build lands outside it.
-    if ( cd "${_aes_gem5_src}" && scons -j"$(nproc 2>/dev/null || echo 4)" "build/${_aes_gem5_isa}/gem5.${_aes_gem5_variant}" ) \
-            && echo "${_aes_gem5_current_commit}" > "${_aes_gem5_stamp_file}"; then
+    if ( cd "${_aes_gem5_src}" && scons -j"$(nproc 2>/dev/null || echo 4)" \
+                "EXTRAS=${_aes_gem5_extras}" \
+                "build/${_aes_gem5_isa}/gem5.${_aes_gem5_variant}" ) \
+            && echo "${_aes_gem5_stamp}" > "${_aes_gem5_stamp_file}"; then
         echo "gem5 build complete."
     else
         echo "gem5 build failed." >&2
@@ -110,7 +143,7 @@ gem5() {
     "${GEM5_BIN}" "$@"
 }
 
-unset _aes_gem5_src _aes_gem5_isa _aes_gem5_variant _aes_gem5_bin _aes_gem5_stamp_file
+unset _aes_gem5_src _aes_gem5_isa _aes_gem5_variant _aes_gem5_bin _aes_gem5_stamp_file _aes_gem5_extras _aes_gem5_stamp
 
 # --- DSENT (NoC power/area model used by Garnet) ------------------------
 # ext/gem5/ext/dsent/interface.cc only builds against the Python 2 C API

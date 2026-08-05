@@ -51,6 +51,12 @@ def find_caches(config: dict) -> list[CacheInfo]:
     def walk(obj, path: str, stack: list[dict]):
         if isinstance(obj, dict):
             size, assoc = obj.get("size"), obj.get("assoc")
+            # A CactiCache model carries a copy of the geometry of the cache
+            # it is attached to (see scripts/attach_cacti.py), so it looks
+            # exactly like a cache here; counting it would report every cache
+            # of such a run twice.
+            if obj.get("type") == "CactiCache":
+                size = assoc = None
             if isinstance(size, int) and isinstance(assoc, int):
                 block_size = obj.get("block_size") or obj.get("blk_size") or block_size_from_context(stack)
                 banks = obj.get("dataArrayBanks") or 1

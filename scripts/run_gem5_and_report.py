@@ -6,8 +6,13 @@ Runs gem5 on the given config script, then automatically:
   - pulls any native power_model.dynamicPower/staticPower stats straight out
     of stats.txt (only present if the config script wired up a power model,
     e.g. scripts/run_minor_ruby_power.py does)
+  - pulls the in-simulation Cacti stats out of stats.txt, if the config script
+    attached CactiCache models (scripts/attach_cacti.py, which
+    scripts/run_minor_ruby_power.py calls by default)
   - runs scripts/garnet_power_from_m5out.py (DSENT) if the run used Garnet
-  - runs scripts/cacti_from_m5out.py if the run has any caches
+  - runs scripts/cacti_from_m5out.py if the run has caches but no
+    in-simulation Cacti stats (the two compute the same numbers; the external
+    step is the fallback for configs that don't attach the models)
 
 Requires the environment to be active (`source activate_environment.sh` from
 the repo root) -- gem5 to run the sim, and DSENT/Cacti for whichever of the
@@ -49,6 +54,29 @@ POWER_MODEL_RE = re.compile(
     re.MULTILINE,
 )
 
+# Stats of the CactiCache SimObjects attached by scripts/attach_cacti.py,
+# which gem5 dumps as "<cache>.cacti.<stat>".
+CACTI_STAT_RE = re.compile(
+    r"^([\w.]+)\.cacti\.(\w+)\s+([0-9.eE+-]+)", re.MULTILINE
+)
+
+# (stat, label, unit): what to show for each cache, in this order. The stats
+# are already in these units, see gem5_extras/cacti/cacti_cache.hh.
+CACTI_REPORT_FIELDS = [
+    ("area", "Area", "mm^2"),
+    ("accessTime", "Access time", "ns"),
+    ("cycleTime", "Cycle time", "ns"),
+    ("readEnergyPerAccess", "Read energy/access", "nJ"),
+    ("writeEnergyPerAccess", "Write energy/access", "nJ"),
+    ("leakagePower", "Leakage power", "mW"),
+    ("readAccesses", "Read accesses", ""),
+    ("writeAccesses", "Write accesses", ""),
+    ("dynamicEnergy", "Dynamic energy", "uJ"),
+    ("leakageEnergy", "Leakage energy", "uJ"),
+    ("totalEnergy", "Total energy", "uJ"),
+    ("averagePower", "Average power", "mW"),
+]
+
 
 def split_passthrough_args(argv: list[str]) -> tuple[list[str], list[str]]:
     """Split argv on the first "--" into (wrapper args, gem5-script args)."""
@@ -76,6 +104,37 @@ def find_power_model_stats(outdir: Path) -> dict[str, dict[str, float]]:
     for path, kind, value in POWER_MODEL_RE.findall(stats_txt.read_text()):
         results.setdefault(path, {})[kind] = float(value)
     return results
+
+
+def find_cacti_stats(outdir: Path) -> dict[str, dict[str, float]]:
+    """Cacti's in-simulation numbers, per cache, out of stats.txt."""
+    stats_txt = outdir / "stats.txt"
+    if not stats_txt.is_file():
+        return {}
+    results: dict[str, dict[str, float]] = {}
+    for path, stat, value in CACTI_STAT_RE.findall(stats_txt.read_text()):
+        results.setdefault(path, {})[stat] = float(value)
+    return results
+
+
+def format_cacti_stats(cacti_stats: dict[str, dict[str, float]]) -> list[str]:
+    lines = []
+    total_energy = 0.0
+    total_area = 0.0
+    for path, values in sorted(cacti_stats.items()):
+        lines.append(f"{path}:")
+        for stat, label, unit in CACTI_REPORT_FIELDS:
+            if stat not in values:
+                continue
+            suffix = f" {unit}" if unit else ""
+            lines.append(f"  {label + ':':<22}{values[stat]:.6g}{suffix}")
+        total_area += values.get("area", 0.0)
+        total_energy += values.get("totalEnergy", 0.0)
+        lines.append("")
+    lines.append(
+        f"All caches: {total_area:.6g} mm^2, {total_energy:.6g} uJ total energy"
+    )
+    return lines
 
 
 def network_type(outdir: Path) -> str | None:
@@ -109,6 +168,12 @@ def main() -> int:
     )
     parser.add_argument("--skip-dsent", action="store_true", help="skip the DSENT/Garnet NoC step")
     parser.add_argument("--skip-cacti", action="store_true", help="skip the Cacti cache step")
+    parser.add_argument(
+        "--external-cacti",
+        action="store_true",
+        help="run cacti_from_m5out.py even when the run already reported "
+             "Cacti stats from inside the simulation",
+    )
     own_argv, script_argv = split_passthrough_args(sys.argv[1:])
     args = parser.parse_args(own_argv)
 
@@ -142,6 +207,17 @@ def main() -> int:
         )
     report_sections.append("\n".join(section))
 
+    cacti_stats = find_cacti_stats(args.outdir)
+    section = ["\n## Cache power/area/timing (Cacti, from inside the simulation)\n"]
+    if cacti_stats:
+        section.extend(format_cacti_stats(cacti_stats))
+    else:
+        section.append(
+            "(none found -- the config script didn't attach any CactiCache "
+            "models; see scripts/attach_cacti.py)"
+        )
+    report_sections.append("\n".join(section))
+
     net_type = network_type(args.outdir)
     section = ["\n## Garnet NoC power/area (DSENT)\n"]
     if args.skip_dsent:
@@ -157,9 +233,14 @@ def main() -> int:
         section.append(output.strip() if rc == 0 else f"(garnet_power_from_m5out.py failed, exit {rc}):\n{output.strip()}")
     report_sections.append("\n".join(section))
 
-    section = ["\n## Cache power/area/timing (Cacti)\n"]
+    section = ["\n## Cache power/area/timing (Cacti, run externally)\n"]
     if args.skip_cacti:
         section.append("(skipped: --skip-cacti)")
+    elif cacti_stats and not args.external_cacti:
+        section.append(
+            "(skipped: the simulation already ran Cacti itself, see above -- "
+            "pass --external-cacti to run it again from outside)"
+        )
     else:
         rc, output = run_subscript(CACTI_SCRIPT, [str(args.outdir)])
         print("=== Cacti (caches) ===")
