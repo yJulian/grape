@@ -1,8 +1,10 @@
 #include "cacti_runner.hh"
 
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <cerrno>
+#include <cstdio>
 #include <cstring>
 #include <new>
 
@@ -51,49 +53,38 @@ accessModeCode(const std::string &mode)
     return 0; // normal
 }
 
-class ScopedChdir
+/** What the child process hands back to the parent. POD, written to a pipe
+ * as raw bytes: both ends are the same binary. */
+struct Payload
 {
-  public:
-    explicit ScopedChdir(const std::string &dir) : valid(false)
-    {
-        if (!getcwd(saved, sizeof(saved)))
-            return;
-        valid = chdir(dir.c_str()) == 0;
-    }
-
-    ~ScopedChdir()
-    {
-        if (valid && chdir(saved) != 0) {
-            // Nothing sensible left to do here; the caller already has its
-            // results and the process is about to run a simulation from the
-            // wrong directory, so make the failure loud rather than silent.
-            std::perror("cacti_runner: could not restore working directory");
-        }
-    }
-
-    bool ok() const { return valid; }
-
-  private:
-    char saved[4096];
-    bool valid;
+    bool ok;
+    Result res;
+    char error[256];
 };
 
-} // anonymous namespace
-
-bool
-run(const Request &req, Result &res, std::string &error)
+void
+setError(Payload &payload, const std::string &message)
 {
-    ScopedChdir cwd(req.cactiHome);
-    if (!cwd.ok()) {
-        error = "could not change into Cacti's directory '" + req.cactiHome +
-                "': " + std::strerror(errno);
-        return false;
+    payload.ok = false;
+    std::snprintf(payload.error, sizeof(payload.error), "%s", message.c_str());
+}
+
+/** Runs Cacti in this process. Only ever called in the forked child, because
+ * Cacti reacts to an input it cannot model by exiting. */
+void
+runHere(const Request &req, Payload &payload)
+{
+    // No need to change back: this is a child process that is about to exit.
+    if (chdir(req.cactiHome.c_str()) != 0) {
+        setError(payload, "could not change into Cacti's directory '" +
+                              req.cactiHome + "': " + std::strerror(errno));
+        return;
     }
 
     if (access(req.templateCfg.c_str(), R_OK) != 0) {
-        error = "template config '" + req.templateCfg +
-                "' is not readable: " + std::strerror(errno);
-        return false;
+        setError(payload, "template config '" + req.templateCfg +
+                              "' is not readable: " + std::strerror(errno));
+        return;
     }
 
     InputParameter *ip = freshInputParameter();
@@ -128,8 +119,8 @@ run(const Request &req, Result &res, std::string &error)
 
     if (!ip->error_checking()) {
         // error_checking() has already explained itself on stderr.
-        error = "Cacti rejected the cache configuration";
-        return false;
+        setError(payload, "Cacti rejected the cache configuration");
+        return;
     }
 
     init_tech_params(ip->F_sz_um, false);
@@ -138,6 +129,7 @@ run(const Request &req, Result &res, std::string &error)
     uca_org_t fin_res;
     solve(&fin_res);
 
+    Result &res = payload.res;
     res.accessTimeSeconds = fin_res.access_time;
     res.cycleTimeSeconds = fin_res.cycle_time;
     res.areaMm2 = fin_res.area / 1e6;      // Cacti reports um^2
@@ -152,10 +144,95 @@ run(const Request &req, Result &res, std::string &error)
     g_ip = nullptr;
 
     if (res.accessTimeSeconds <= 0.0 || res.areaMm2 <= 0.0) {
-        error = "Cacti did not find a valid cache organization";
+        setError(payload, "Cacti did not find a valid cache organization");
+        return;
+    }
+
+    payload.ok = true;
+}
+
+/** Reads exactly len bytes, or returns false. */
+bool
+readAll(int fd, void *buffer, size_t len)
+{
+    char *at = static_cast<char *>(buffer);
+    while (len) {
+        const ssize_t got = read(fd, at, len);
+        if (got <= 0)
+            return false;
+        at += got;
+        len -= got;
+    }
+    return true;
+}
+
+} // anonymous namespace
+
+bool
+run(const Request &req, Result &res, std::string &error)
+{
+    // Cacti responds to an input it cannot model -- a cache below ~4KB, for
+    // instance -- by printing a message and calling exit(), which would take
+    // the whole simulation down with it. Its results are also computed by a
+    // pile of 2008-vintage code that this project does not maintain. So it
+    // runs in a forked child: whatever it does to that process, the parent
+    // only sees a failed run and reports it as one.
+    int fds[2];
+    if (pipe(fds) != 0) {
+        error = std::string("could not create a pipe: ") + std::strerror(errno);
         return false;
     }
 
+    const pid_t pid = fork();
+    if (pid < 0) {
+        error = std::string("could not fork: ") + std::strerror(errno);
+        close(fds[0]);
+        close(fds[1]);
+        return false;
+    }
+
+    if (pid == 0) {
+        close(fds[0]);
+
+        Payload payload;
+        std::memset(&payload, 0, sizeof(payload));
+        runHere(req, payload);
+
+        const ssize_t written = write(fds[1], &payload, sizeof(payload));
+        close(fds[1]);
+        // _exit(), not exit(): gem5's atexit handlers belong to the parent.
+        _exit(written == sizeof(payload) ? 0 : 1);
+    }
+
+    close(fds[1]);
+
+    Payload payload;
+    std::memset(&payload, 0, sizeof(payload));
+    const bool complete = readAll(fds[0], &payload, sizeof(payload));
+    close(fds[0]);
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+    }
+
+    if (!complete) {
+        if (WIFSIGNALED(status)) {
+            error = "Cacti was killed by signal " +
+                    std::to_string(WTERMSIG(status));
+        } else {
+            error = "Cacti exited (status " +
+                    std::to_string(WIFEXITED(status) ? WEXITSTATUS(status) : -1) +
+                    ") without producing a result; its own message is above";
+        }
+        return false;
+    }
+
+    if (!payload.ok) {
+        error = payload.error;
+        return false;
+    }
+
+    res = payload.res;
     return true;
 }
 

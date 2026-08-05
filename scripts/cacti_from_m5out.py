@@ -48,16 +48,17 @@ def find_caches(config: dict) -> list[CacheInfo]:
                 return ctx["cache_line_size"]
         return GEM5_DEFAULT_BLOCK_SIZE
 
-    def walk(obj, path: str, stack: list[dict]):
+    def walk(obj, path: str, stack: list[dict], inside_cache: bool):
         if isinstance(obj, dict):
             size, assoc = obj.get("size"), obj.get("assoc")
-            # A CactiCache model carries a copy of the geometry of the cache
-            # it is attached to (see scripts/attach_cacti.py), so it looks
-            # exactly like a cache here; counting it would report every cache
-            # of such a run twice.
-            if obj.get("type") == "CactiCache":
-                size = assoc = None
-            if isinstance(size, int) and isinstance(assoc, int):
+            is_cache = isinstance(size, int) and isinstance(assoc, int)
+            # A classic cache holds a tags object, which in turn holds an
+            # indexing policy, and all three repeat the same geometry -- as
+            # does a CactiCache model of the cache, if the run attached one
+            # (see scripts/attach_cacti.py). Only the outermost of those is
+            # the cache; counting the rest would report it several times
+            # over, each time with its full area and energy.
+            if is_cache and not inside_cache:
                 block_size = obj.get("block_size") or obj.get("blk_size") or block_size_from_context(stack)
                 banks = obj.get("dataArrayBanks") or 1
                 caches.append(CacheInfo(
@@ -70,12 +71,13 @@ def find_caches(config: dict) -> list[CacheInfo]:
                 ))
             stack = stack + [obj]
             for key, value in obj.items():
-                walk(value, f"{path}.{key}" if path else key, stack)
+                walk(value, f"{path}.{key}" if path else key, stack,
+                     inside_cache or is_cache)
         elif isinstance(obj, list):
             for i, value in enumerate(obj):
-                walk(value, f"{path}[{i}]", stack)
+                walk(value, f"{path}[{i}]", stack, inside_cache)
 
-    walk(config, "", [config])
+    walk(config, "", [config], False)
     return caches
 
 

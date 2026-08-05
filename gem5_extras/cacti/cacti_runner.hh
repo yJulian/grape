@@ -72,12 +72,14 @@ struct Result
 };
 
 /**
- * Run Cacti in-process.
+ * Run Cacti and return what it found.
  *
- * Not reentrant: Cacti keeps its inputs in a global (g_ip) and finds its
- * technology files relative to the current working directory, so this
- * changes into req.cactiHome for the duration of the call. gem5 calls it
- * only from startup(), i.e. single-threaded and before the simulation runs.
+ * Cacti runs in a forked child, because it responds to an input it cannot
+ * model -- a cache below ~4KB, for instance -- by printing a message and
+ * calling exit(), and because it finds its technology files relative to the
+ * working directory, which the simulator should not have to change. Both
+ * stay contained in the child; the caller only ever sees a result or a
+ * failure.
  *
  * @return true on success; on failure, error explains why.
  */

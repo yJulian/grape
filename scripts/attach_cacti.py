@@ -8,9 +8,10 @@ Cacti in-process and reports its numbers -- area, access/cycle time,
 per-access energy, leakage -- as stats of that cache, together with the energy
 they imply for the accesses the run actually performed:
 
-    system.cpu.dcache.cacti.area                 0.043467   # mm^2
-    system.cpu.dcache.cacti.totalEnergy          0.000014   # J
-    system.cpu.dcache.cacti.averagePower         0.045003   # W
+    system.ruby.l1_cntrl0.cacheMemory.cacti.area           0.147408  # mm^2
+    system.ruby.l1_cntrl0.cacheMemory.cacti.readAccesses       4603
+    system.ruby.l1_cntrl0.cacheMemory.cacti.totalEnergy    1.311562  # uJ
+    system.ruby.l1_cntrl0.cacheMemory.cacti.averagePower  51.051432  # mW
 
 Import it from a gem5 config script (it runs inside gem5's Python, so `m5` has
 to be importable) and call attach_cacti(system) after the system is built and
@@ -71,20 +72,27 @@ def _int_param(obj, name):
         return None
 
 
-def find_caches(root):
-    """Every SimObject under root that looks like a cache.
+def _is_a(obj, type_name):
+    """isinstance() against a gem5 type that this build may not have."""
+    cls = getattr(m5.objects, type_name, None)
+    return cls is not None and isinstance(obj, cls)
 
-    gem5 identifies caches by type in inconsistent ways (classic "Cache",
-    Ruby "RubyCache", protocol-specific controller types, ...), but both the
-    classic and the Ruby cache-storage object always carry a size *and* an
-    associativity, so that combination is the detection signal -- the same
-    heuristic scripts/cacti_from_m5out.py uses on config.json.
+
+def find_caches(root):
+    """Every cache under root: the classic ones and the Ruby ones.
+
+    Matching on the types rather than on "has a size and an associativity"
+    (which is what scripts/cacti_from_m5out.py has to do, working from
+    config.json without type information) matters here: a classic cache's
+    tags object and *its* indexing policy repeat the geometry of the cache
+    they belong to, so a duck-typed search returns each classic cache three
+    times over.
     """
     caches = []
     for obj in root.descendants():
-        size = _int_param(obj, "size")
-        assoc = _int_param(obj, "assoc")
-        if size and assoc:
+        if not (_is_a(obj, "BaseCache") or _is_a(obj, "RubyCache")):
+            continue
+        if _int_param(obj, "size") and _int_param(obj, "assoc"):
             caches.append(obj)
     return caches
 
@@ -97,12 +105,6 @@ def _block_size(cache, system):
     return _int_param(system, "cache_line_size") or GEM5_DEFAULT_BLOCK_SIZE
 
 
-def _is_a(obj, type_name):
-    """isinstance() against a gem5 type that this build may not have."""
-    cls = getattr(m5.objects, type_name, None)
-    return cls is not None and isinstance(obj, cls)
-
-
 def _access_stats(cache):
     """The stat names holding this cache's access counts.
 
@@ -112,8 +114,8 @@ def _access_stats(cache):
         return RUBY_READ_STATS, RUBY_WRITE_STATS, RUBY_FALLBACK_STATS
     if _is_a(cache, "BaseCache"):
         return CLASSIC_READ_STATS, CLASSIC_WRITE_STATS, []
-    # Something cache-shaped that is neither: model its geometry, but don't
-    # guess at stat names that probably don't exist.
+    # Not something find_caches() returns, but a caller attaching a model by
+    # hand can still get the geometry without inventing stat names.
     return [], [], []
 
 
@@ -162,7 +164,9 @@ def attach_cacti(
         model = CactiCache(
             cacti_home=cacti_home,
             template_cfg=template_cfg or "",
-            size=_int_param(cache, "size"),
+            # MemorySize parameters only accept strings; a naked magnitude
+            # is read as a plain byte count.
+            size=str(_int_param(cache, "size")),
             assoc=_int_param(cache, "assoc"),
             block_size=_block_size(cache, system),
             banks=_int_param(cache, "dataArrayBanks") or 1,

@@ -130,11 +130,18 @@ CactiCache::startup()
             (unsigned long long)req.sizeBytes, req.assoc, req.lineBytes,
             req.banks, req.techNm, req.temperatureK);
 
+    // A cache Cacti cannot model is not a reason to abandon the simulation:
+    // gem5's page-table walker caches are 1KB, below anything Cacti will
+    // produce an organization for, and a run whose caches are otherwise fine
+    // should still finish. Those models report zeros, and say why.
     std::string error;
-    fatal_if(!grape::cacti::run(req, result, error),
-             "%s: Cacti failed for a %lluB %u-way cache with %uB lines: %s",
+    if (!grape::cacti::run(req, result, error)) {
+        warn("%s: Cacti could not model this %lluB %u-way cache with %uB "
+             "lines (%s); its stats will be zero.",
              name(), (unsigned long long)req.sizeBytes, req.assoc,
              req.lineBytes, error);
+        return;
+    }
 
     banks = req.banks;
 
