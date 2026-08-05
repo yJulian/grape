@@ -17,12 +17,21 @@ in-process and its area/energy numbers appear in `stats.txt` next to the
 cache's own stats, with no separate script step:
 
 ```
-system.cpu.dcache.cacti.area                 0.030571   # total cache area as modeled by Cacti (mm^2)
-system.cpu.dcache.cacti.accessTime           0.000000   # Cacti access time of the cache (Second)
-system.cpu.dcache.cacti.readAccesses      12175.000000  # read accesses counted by the modeled cache (Count)
-system.cpu.dcache.cacti.totalEnergy          0.000004   # dynamic plus leakage energy over the simulated period (Joule)
-system.cpu.dcache.cacti.averagePower         0.020713   # average total power over the simulated period (Watt)
+system.cpu.dcache.cacti.area                 0.147408   # total cache area as modeled by Cacti (mm^2)
+system.cpu.dcache.cacti.accessTime           0.417514   # Cacti access time of the cache (ns)
+system.cpu.dcache.cacti.readEnergyPerAccess  0.042514   # Cacti dynamic energy of one read access (nJ)
+system.cpu.dcache.cacti.leakagePower        43.434353   # Cacti leakage power of all banks together (mW)
+system.cpu.dcache.cacti.readAccesses             1292   # read accesses counted by the modeled cache
+system.cpu.dcache.cacti.writeAccesses            1015   # write accesses counted by the modeled cache
+system.cpu.dcache.cacti.totalEnergy          1.595570   # dynamic plus leakage energy over the run (uJ)
+system.cpu.dcache.cacti.averagePower        47.028114   # average total power over the run (mW)
 ```
+
+The access counts are the cache's own, so the energies are those of the run
+that just finished rather than of a hypothetical access pattern. Caches Cacti
+cannot model -- it refuses anything below ~4KB, which includes gem5's 1KB
+page-table walker caches -- report zeros and explain themselves in a warning,
+instead of taking the simulation down with them.
 
 ## Current state
 
