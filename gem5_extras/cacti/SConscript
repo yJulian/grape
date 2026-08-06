@@ -1,0 +1,46 @@
+# Build the Cacti-backed SimObject into gem5.
+#
+# Point scons at this directory with EXTRAS, and tell it where Cacti is:
+#
+#   scons build/RISCV/gem5.opt EXTRAS=<repo>/gem5_extras/cacti \
+#       GRAPE_CACTI_SRC=<cacti source dir> GRAPE_CACTI_LIB=<libcacti.a>
+#
+# activate_environment.sh does all of that (and builds libcacti.a first).
+
+import os
+
+from gem5_scons import error
+
+Import('*')
+
+def cacti_path(var, what):
+    path = os.environ.get(var, '')
+    if not path:
+        error('$%s is not set, so gem5 cannot be built against Cacti (%s).\n'
+              "Source activate_environment.sh, which builds Cacti and sets it, "
+              'or drop this directory from EXTRAS.' % (var, what))
+    path = os.path.abspath(path)
+    if not os.path.exists(path):
+        error('$%s points at %s, which does not exist.' % (var, path))
+    return path
+
+# Cacti's headers, and the static library activate_environment.sh builds from
+# the same sources (everything but its main()).
+cacti_src = cacti_path('GRAPE_CACTI_SRC', 'its headers')
+cacti_lib = cacti_path('GRAPE_CACTI_LIB', 'its static library')
+
+SimObject('CactiCache.py', sim_objects=['CactiCache'])
+
+Source('cacti_cache.cc')
+
+# Cacti is from 2008 and does not survive gem5's warning flags, so the one
+# file that includes its headers is compiled with them turned off. It is also
+# the only file that sees those headers: they declare a lot of very generic
+# unqualified globals (Wire, Component, g_ip, ...) that have no business
+# being visible to the rest of gem5.
+Source('cacti_runner.cc',
+       append={'CPPPATH': [Dir(cacti_src)], 'CXXFLAGS': ['-w', '-Wno-error']})
+
+SourceLib(File(cacti_lib))
+
+DebugFlag('Cacti', 'Cacti area/power modeling of gem5 caches')

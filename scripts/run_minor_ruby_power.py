@@ -73,6 +73,12 @@ from m5.util import (
 
 from gem5.isas import ISA
 
+# gem5 runs this script with __file__ set but without its directory on
+# sys.path, so make the helper next to it importable.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from attach_cacti import attach_cacti
+
 addToPath(os.path.join(os.environ["GEM5_HOME"], "configs"))
 
 from common import (
@@ -268,6 +274,40 @@ parser = argparse.ArgumentParser()
 Options.addCommonOptions(parser)
 Options.addSEOptions(parser)
 
+# Cacti runs inside the simulation (see scripts/attach_cacti.py); these are
+# the circuit-level assumptions gem5's timing-only cache model has no opinion
+# about, and they match scripts/cacti_from_m5out.py's options and defaults.
+cacti_options = parser.add_argument_group("Cacti cache area/power model")
+cacti_options.add_argument(
+    "--no-cacti",
+    action="store_true",
+    help="don't attach Cacti models to the caches",
+)
+cacti_options.add_argument(
+    "--cacti-tech-nm", type=float, default=32, help="technology node in nm"
+)
+cacti_options.add_argument(
+    "--cacti-temperature",
+    type=int,
+    default=360,
+    help="operating temperature in Kelvin",
+)
+cacti_options.add_argument(
+    "--cacti-cache-type",
+    choices=["cache", "ram", "cam"],
+    default="cache",
+    help="Cacti array type",
+)
+cacti_options.add_argument(
+    "--cacti-access-mode",
+    choices=["normal", "sequential", "fast"],
+    default="normal",
+    help="Cacti tag/data access mode",
+)
+cacti_options.add_argument(
+    "--cacti-ports", type=int, default=1, help="read/write ports"
+)
+
 if "--ruby" in sys.argv:
     Ruby.define_options(parser)
 
@@ -417,5 +457,15 @@ root = Root(full_system=False, system=system)
 # stat-path token) once the object is actually rooted, so this must run
 # after Root() is constructed above.
 attach_power_models(system)
+
+if not args.no_cacti:
+    attach_cacti(
+        system,
+        tech_nm=args.cacti_tech_nm,
+        temperature=args.cacti_temperature,
+        cache_type=args.cacti_cache_type,
+        access_mode=args.cacti_access_mode,
+        ports=args.cacti_ports,
+    )
 
 Simulation.run(args, root, system, FutureClass)
